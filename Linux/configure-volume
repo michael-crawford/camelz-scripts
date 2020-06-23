@@ -1,0 +1,199 @@
+#!/bin/bash
+#
+# Configure Volume
+#
+
+#  1. Initialize Environment
+
+logfile=/var/log/$(basename $0).log
+initial_echo=1  # Start cfn-init.log command output on new line
+
+interactive=1
+verbose=1
+clear=0
+preserve=0
+unset device
+unset mountpoint
+
+
+#  2. Define functions
+
+usage() {
+    echo "Usage: ${BASH_SOURCE##*/} [-n] [-v] [-c] [-p]"
+    echo "                  [-d device] [-m mountpoint]"
+    echo "  -n              non-interactive"
+    echo "  -v              verbose"
+    echo "  -c              clear existing files below mountpoint"
+    echo "  -p              preserve existing files below mountpoint and move to new disk"
+    echo "  -d device       Device"
+    echo "  -m mountpoint   Mount Point"
+}
+
+console() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN";  shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO";  shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO";;
+    esac
+
+    if [ $interactive = 1 ]; then
+        if [ $verbose -ge $level ]; then
+            echo "$*"
+        fi
+    else
+        [ $initial_echo = 1 ] && echo && initial_echo=0
+        # cfn-init.log format
+        echo "$(date +'%Y-%m-%d %H:%M:%S,%3N') [$label] $*"
+    fi
+}
+
+log() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN "; shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO "; shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO ";;
+    esac
+
+    # syslog format
+    echo "$(date +'%b %e %H:%M:%S') $this_host $(basename $0): $label $*" >> $logfile
+}
+
+
+#  3. Parse command line options
+
+while getopts nvcpd:m:? arg; do
+    case $arg in
+    n)  interactive=0;;
+    v)  ((verbose++));;
+    c)  clear=1;;
+    p)  preserve=1;;
+    d)  device="$OPTARG";;
+    m)  mountpoint="$OPTARG";;
+    ?)  usage
+        exit 1;;
+    esac
+done
+
+shift $(($OPTIND - 1))
+
+
+#  4. Validate environment
+
+if [ -z $device ]; then
+    console ERROR "-d device missing!"
+    exit 10
+else
+    case $device in
+      xvdb) nvme_device=nvme1n1;;
+      xvdc) nvme_device=nvme2n1;;
+      xvdd) nvme_device=nvme3n1;;
+      xvde) nvme_device=nvme4n1;;
+      xvdf) nvme_device=nvme5n1;;
+      xvdg) nvme_device=nvme6n1;;
+      xvdh) nvme_device=nvme7n1;;
+      xvdi) nvme_device=nvme8n1;;
+      xvdj) nvme_device=nvme9n1;;
+      xvdk) nvme_device=nvme10n1;;
+      xvdl) nvme_device=nvme11n1;;
+      xvdm) nvme_device=nvme12n1;;
+      xvdn) nvme_device=nvme13n1;;
+      xvdo) nvme_device=nvme14n1;;
+      xvdp) nvme_device=nvme15n1;;
+      xvdq) nvme_device=nvme16n1;;
+      xvdr) nvme_device=nvme17n1;;
+      xvds) nvme_device=nvme18n1;;
+      xvdt) nvme_device=nvme19n1;;
+      xvdu) nvme_device=nvme20n1;;
+      xvdv) nvme_device=nvme21n1;;
+      xvdw) nvme_device=nvme22n1;;
+      xvdx) nvme_device=nvme23n1;;
+      xvdy) nvme_device=nvme24n1;;
+      xvdz) nvme_device=nvme25n1;;
+      *)
+        console ERROR "-d $device invalid! Must be between xvdb and xvdz"
+        exit 11;;
+    esac
+fi
+
+if [ -z $mountpoint ]; then
+    console WARN "-m mountpoint missing!"
+    exit 12
+fi
+
+
+#  5. Main
+
+if [ -b /dev/nvme0n1 ]; then
+    device=$nvme_device
+    console DEBUG "Instance uses NVMe disks, using NVME device /dev/$device"
+fi
+
+console DEBUG "Wait for Instance to recognize Device /dev/$device"
+attempt=0
+attempts=30
+delay=10
+attached=0
+while ((attempt++ <= attempts)); do
+    if fdisk -l /dev/$device &> /dev/null; then
+        attached=1
+        break
+    else
+        console DEBUG "Device /dev/$device not yet recognized, pausing $delay seconds..."
+        sleep $delay
+    fi
+done
+
+if [ $attached = 1 ]; then
+    console "Device /dev/$device recognized"
+else
+    console ERROR "Device /dev/$device was not recognized"
+    exit 2
+fi
+
+filesystem_type=$(file -sL /dev/$device)
+if [[ $filesystem_type == *"XFS"* ]]; then
+    console DEBUG "Device /dev/$device formatted with XFS Filesystem"
+    console DEBUG "Existing Volume: using Snapshot, or mapping Volume to replacement Instance"
+
+    if [ $clear = 1 ]; then
+        console "Clearing $mountpoint/*"
+        rm -Rf $mountpoint/* 2>&1 | sed -e "s/^/$(date +'%Y-%m-%d %H:%M:%S,%3N') [DEBUG] /"
+    fi
+else
+    console DEBUG "Device /dev/$device not formatted"
+    console DEBUG "New Volume: mapping Volume to initial Instance"
+
+    console "Formatting Device /dev/$device with XFS filesystem"
+    mkfs -t xfs /dev/$device 2>&1 | sed -e "s/^/$(date +'%Y-%m-%d %H:%M:%S,%3N') [DEBUG] /"
+    xfs_admin -L ${mountpoint##*/} /dev/$device 2>&1 | sed -e "s/^/$(date +'%Y-%m-%d %H:%M:%S,%3N') [DEBUG] /"
+
+    if [ $preserve = 1 ]; then
+        console "Moving $mountpoint to $mountpoint-save"
+        mv $mountpoint $mountpoint-save
+    fi
+
+    console "Creating $mountpoint"
+    mkdir -p $mountpoint 2>&1 | sed -e "s/^/$(date +'%Y-%m-%d %H:%M:%S,%3N') [DEBUG] /"
+fi
+
+console "Adding $mountpoint to /etc/fstab"
+UUID=$(blkid -s UUID -o value /dev/$device)
+sed -i -e "/^UUID=$UUID/d" /etc/fstab
+sed -i -e "\$aUUID=$UUID    $mountpoint    xfs    defaults,noatime  1   1" /etc/fstab
+
+console "Mounting $mountpoint"
+mount $mountpoint 2>&1 | sed -e "s/^/$(date +'%Y-%m-%d %H:%M:%S,%3N') [DEBUG] /"
+
+if [ $preserve = 1 ]; then
+    console "Syncing $mountpoint-save to $mountpoint"
+    rsync -avzP $mountpoint-save/ $mountpoint 2>&1 | sed -e "s/^/$(date +'%Y-%m-%d %H:%M:%S,%3N') [DEBUG] /"
+    console "Deleting $mountpoint-save"
+    rm -Rf $mountpoint-save
+fi
+rc=$?
+sleep 2 # Wait for script messages to post
+exit $rc

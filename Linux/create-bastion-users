@@ -1,0 +1,139 @@
+#!/bin/bash
+#
+# Create Bastion Users
+#
+
+#  1. Initalize Environment
+
+zone=$(curl -s -m 60 http://169.254.169.254/latest/meta-data/placement/availability-zone)
+region=${zone:: -1}
+
+logfile=/var/log/$(basename $0).log
+initial_echo=1  # Start cfn-init.log command output on new line
+
+interactive=1
+verbose=1
+admins=0
+
+
+#  2. Define functions
+
+usage() {
+    echo "Usage: ${BASH_SOURCE##*/} [-n] [-v] [-a]"
+    echo "  -n              non-interactive"
+    echo "  -v              verbose"
+    echo "  -a              administrators"
+}
+
+console() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN";  shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO";  shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO";;
+    esac
+
+    if [ $interactive = 1 ]; then
+        if [ $verbose -ge $level ]; then
+            echo "$*"
+        fi
+    else
+        [ $initial_echo = 1 ] && echo && initial_echo=0
+        # cfn-init.log format
+        echo "$(date +'%Y-%m-%d %H:%M:%S,%3N') [$label] $*"
+    fi
+}
+
+log() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN "; shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO "; shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO ";;
+    esac
+
+    # syslog format
+    echo "$(date +'%b %e %H:%M:%S') $this_host $(basename $0): $label $*" >> $logfile
+}
+
+
+#  3. Parse command line options
+
+while getopts nva? arg; do
+    case $arg in
+    n)  interactive=0;;
+    v)  ((verbose++));;
+    a)  admins=1;;
+    ?)  usage
+        exit 1;;
+    esac
+done
+
+shift $(($OPTIND - 1))
+
+
+#  4. Validate environment
+
+
+#  5. Main
+
+if [ $admins = 1 ]; then
+    group=BastionAdministrators
+    type=administrators
+else
+    group=BastionUsers
+    type=users
+fi
+
+console DEBUG "Obtaining members of $group IAM Group:"
+users=$(aws iam get-group --group-name $group \
+                          --query 'Users[].UserName' \
+                          --region $region --output text)
+console DEBUG "Adding local $type based on membership in $group IAM Group:"
+for user in $users; do
+    status="- $user"
+    if ! id $user &> /dev/null; then
+        keys=$(aws iam list-ssh-public-keys --user-name $user \
+                                            --query 'SSHPublicKeys[].SSHPublicKeyId' \
+                                            --region $region --output text)
+        if [ ! "$keys" = "" ]; then
+            if [ -d /home/$user ]; then
+                /usr/sbin/useradd -M $user
+            else
+                /usr/sbin/useradd $user
+            fi
+            if [ $admins = 1 ]; then
+                echo "$user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$user
+                chmod 0400 /etc/sudoers.d/$user
+            fi
+            mkdir -p /home/$user/.ssh
+            chmod 0700 /home/$user/.ssh
+            rm -f /home/$user/.ssh/authorized_keys
+            for key in $keys; do
+                status="$status - $key"
+                echo $(aws iam get-ssh-public-key --user-name $user \
+                                                  --ssh-public-key-id $key \
+                                                  --encoding SSH \
+                                                  --query 'SSHPublicKey.SSHPublicKeyBody' \
+                                                  --region $region --output text) >> /home/$user/.ssh/authorized_keys
+            done
+            chmod 0600 /home/$user/.ssh/authorized_keys
+            rm -f /home/$user/.ssh/config
+            echo "Host *" >> /home/$user/.ssh/config
+            echo "  ForwardAgent yes" >> /home/$user/.ssh/config
+            echo "  User ec2-user" >> /home/$user/.ssh/config
+            chmod 0600 /home/$user/.ssh/config
+            chown -R $user:$user /home/$user/.ssh
+        else
+            status="$status - skipped (no SSH Key)"
+        fi
+    else
+        status="$status - skipped (user exists)"
+    fi
+    console DEBUG $status
+done
+rc=$?
+sleep 2 # Wait for script messages to post
+exit $rc

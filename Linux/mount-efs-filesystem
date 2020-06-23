@@ -1,0 +1,165 @@
+#!/bin/bash
+#
+# Mount EFS FileSystem
+#
+# Note: The DNS Name provided by EFS in the form: fs-df001474.efs.us-west-2.amazonaws.com returns
+#       the IP address of the Mount Target in the same Availability Zone only if the DNS request
+#       is made directly against AmazonProvidedDNS by an Instance in the same VPC. If the Instance
+#       is in a different VPC, or the request first goes through DirectoryService, the returned
+#       IP Address is incorrect. So, either pass the IP address of a specific Mount Target, or
+#       create separate DNS names in a private HostedZone which map to the appropriate Mount Target
+#       and use those names. This script assumes one of these two safer methods are in use.
+#
+
+#  1. Initialize Environment
+
+zone=$(curl -s -m 60 http://169.254.169.254/latest/meta-data/placement/availability-zone)
+region=${zone:: -1}
+zonecode=${zone: -1}
+
+logfile=/var/log/$(basename $0).log
+initial_echo=1  # Start cfn-init.log command output on new line
+
+interactive=1
+verbose=1
+unset filesystem
+unset hostname
+unset mountpoint
+user=root
+group=root
+
+
+#  2. Define functions
+
+usage() {
+    echo "Usage: ${BASH_SOURCE##*/} [-n] [-v]"
+    echo "                  [-f filesystem]"
+    echo "                  [-h hostname] [-m mountpoint]"
+    echo "                  [-u user] [-g group]"
+    echo "  -n              non-interactive"
+    echo "  -v              verbose"
+    echo "  -f filesystem   EFS FileSystem ID"
+    echo "  -h hostname     EFS FileSystem Mount Target (FQDN or IP Address)"
+    echo "  -m mountpoint   Mount Point"
+    echo "  -u user         User to own Mount Point"
+    echo "  -g group        Group to own Mount Point"
+}
+
+console() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN";  shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO";  shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO";;
+    esac
+
+    if [ $interactive = 1 ]; then
+        if [ $verbose -ge $level ]; then
+            echo "$*"
+        fi
+    else
+        [ $initial_echo = 1 ] && echo && initial_echo=0
+        # cfn-init.log format
+        echo "$(date +'%Y-%m-%d %H:%M:%S,%3N') [$label] $*"
+    fi
+}
+
+log() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN "; shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO "; shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO ";;
+    esac
+
+    # syslog format
+    echo "$(date +'%b %e %H:%M:%S') $this_host $(basename $0): $label $*" >> $logfile
+}
+
+
+#  3. Parse command line options
+
+while getopts nvf:h:m:u:g:? arg; do
+    case $arg in
+    n)  interactive=0;;
+    v)  ((verbose++));;
+    f)  filesystem="$OPTARG";;
+    h)  hostname="$OPTARG";;
+    m)  mountpoint="$OPTARG";;
+    u)  user="$OPTARG";;
+    g)  group="$OPTARG";;
+    ?)  usage
+        exit 1;;
+    esac
+done
+
+shift $(($OPTIND - 1))
+
+
+#  4. Validate environment
+
+if [ -z $filesystem ]; then
+    console WARN "-f filesystem missing!"
+    exit 10
+fi
+
+if [ -z $hostname ]; then
+    console WARN "-h hostname missing!"
+    exit 12
+fi
+
+if [ -z $mountpoint ]; then
+    console WARN "-m mountpoint missing!"
+    exit 14
+fi
+
+if [ -z $user ]; then
+    console WARN "-u user missing!"
+    exit 20
+fi
+
+if [ -z $group ]; then
+    console WARN "-g group missing!"
+    exit 22
+fi
+
+
+#  5. Main
+
+console DEBUG "Create $mountpoint mount point"
+mkdir -p $mountpoint
+
+
+console DEBUG "Wait for FileSystem $filesystem Mount Target $hostname to resolve"
+attempt=0
+attempts=30
+delay=10
+resolved=0
+while ((attempt++ <= attempts)); do
+    if getent hosts $hostname &> /dev/null; then
+        resolved=1
+        break
+    else
+        console DEBUG "FileSystem $filesystem Mount Target not yet available, pausing $delay seconds..."
+        sleep $delay
+    fi
+done
+
+if [ $resolved = 1 ]; then
+    console "FileSystem $filesystem Mount Target $hostname resolved"
+else
+    console ERROR "FileSystem $filesystem Mount Target $hostname not resolved"
+    exit 2
+fi
+
+console DEBUG "Add FileSystem $filesystem MountPoint to /etc/fstab"
+sed -i -e "/$hostname/d" -e "$ a$hostname:/ $mountpoint nfs nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2" /etc/fstab
+
+console DEBUG "Mounting $mountpoint"
+mount $mountpoint
+
+chown -R $user:$group $mountpoint
+
+console "FileSystem $filesystem Mount Target $hostname mounted on $mountpoint"

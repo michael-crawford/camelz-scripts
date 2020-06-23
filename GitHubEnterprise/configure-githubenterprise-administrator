@@ -1,0 +1,214 @@
+#!/bin/bash
+#
+# Configure GitHubEnterprise Administrator
+#
+
+#  1. Initalize Environment
+
+logfile=/var/log/$(basename $0).log
+initial_echo=1  # Start cfn-init.log command output on new line
+
+interactive=1
+verbose=1
+private=0
+username=""
+password=""
+email=""
+
+
+#  2. Define functions
+
+usage() {
+    echo "Usage: ${BASH_SOURCE##*/} [-n] [-v] [-p]"
+    echo "                  [-U username] [-P password] [-E email]"
+    echo "  -n              non-interactive"
+    echo "  -v              verbose"
+    echo "  -p              private subnet"
+    echo "  -U username     Administrator Username"
+    echo "  -P password     Administrator Password"
+    echo "  -E email        Administrator Email Address"
+}
+
+console() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN";  shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO";  shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO";;
+    esac
+
+    if [ $interactive = 1 ]; then
+        if [ $verbose -ge $level ]; then
+            echo "$*"
+        fi
+    else
+        [ $initial_echo = 1 ] && echo && initial_echo=0
+        # cfn-init.log format
+        echo "$(date +'%Y-%m-%d %H:%M:%S,%3N') [$label] $*"
+    fi
+}
+
+log() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN "; shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO "; shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO ";;
+    esac
+
+    # syslog format
+    echo "$(date +'%b %e %H:%M:%S') $this_host $(basename $0): $label $*" >> $logfile
+}
+
+isip() {
+    local IFS='.'
+    local ip=$1
+
+    if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        octet=($ip)
+        if [[ ${octet[0]} -le 255 && ${octet[1]} -le 255 && ${octet[2]} -le 255 && ${octet[3]} -le 255 ]]; then
+            return $?
+        else
+            return 9
+        fi
+    fi
+    return 9
+}
+
+
+#  3. Parse command line options
+
+while getopts nvpU:P:E:? arg; do
+    case $arg in
+    n)  interactive=0;;
+    v)  ((verbose++));;
+    p)  private=1;;
+    U)  username="$OPTARG";;
+    P)  password="$OPTARG";;
+    E)  email="$OPTARG";;
+    ?)  usage
+        exit 1;;
+    esac
+done
+
+shift $(($OPTIND - 1))
+
+if [ $private = 1 ]; then
+    address=$(curl -s -m 60 http://169.254.169.254/latest/meta-data/local-ipv4)
+else
+    address=$(curl -s -m 60 http://169.254.169.254/latest/meta-data/public-ipv4)
+fi
+
+
+#  4. Validate environment
+
+if [ -z $username ]; then
+    console ERROR "-U username missing!"
+    exit 10
+fi
+
+if [ -z $password ]; then
+    console ERROR "-P password missing!"
+    exit 12
+fi
+
+if [ -z $email ]; then
+    console ERROR "-E email missing!"
+    exit 14
+fi
+
+if ! isip "$address"; then
+    console ERROR "address is invalid - using private subnet?"
+    exit 20
+fi
+
+
+#  5. Main
+
+join_url=https://$address/join
+login_url=https://$address/login
+
+tmpdir=$(mktemp -d /tmp/XXXXXXXXXXXXX)
+
+console "Confirm GitHub Enterprise Join API is Up"
+# Original: curl -iskL https://$EC2_IP/join | grep 'Status: 200 OK'
+status=$(curl --include --insecure --location --silent --show-error \
+              --output $tmpdir/test-join.out \
+              --write-out '%{http_code}' \
+              $join_url)
+
+case $status in
+  200) # OK
+    console "Join API Up [Status: $status]"
+    ;;
+  *)
+    console ERROR "Join API does not appear to be Up [Status: $status]"
+    console ERROR "Response Body: $(sed -n -e '/^{/,$p' $tmpdir/test-join.out)"
+    exit 1
+    ;;
+esac
+
+
+console "Login to GitHub Enterprise"
+# Original: curl -k -v -L -c $TEMPDIR/cookies https://$EC2_IP/login > $TEMPDIR/github-curl.out
+status=$(curl --insecure --location --silent --show-error \
+              --cookie-jar $tmpdir/cookies \
+              --output $tmpdir/login.out \
+              --write-out '%{http_code}' \
+              $login_url)
+
+case $status in
+  200) # OK
+    console "Login succeeded [Status: $status]"
+    ;;
+  *)
+    console ERROR "Could not Login [Status: $status]"
+    console ERROR "Response Body: $(sed -n -e '/^{/,$p' $tmpdir/login.out)"
+    exit 1
+    ;;
+esac
+
+# Original: token=$(grep 'name="authenticity_token"' $tmpdir/login.out | head -1 | sed -e 's/.*value="\([^"]*\)".*/\1/')
+token=$(sed -n -e 's/.*name="authenticity_token" value="\([^"]*\)".*/\1/p' $tmpdir/login.out)
+
+console "Create first GitHub Enterprise Administrator account"
+# Original: curl -X POST -k -v -b $tmpdir/cookies -c -L $tmpdir/cookies \
+#                -F "authenticity_token=$authenticity_token" \
+#                -F "user[login]=$administrator_username" \
+#                -F "user[email]=$administrator_email" \
+#                -F "user[password]=$administrator_password" \
+#                -F "user[password_confirmation]=$administrator_password" \
+#                -F "source_label=Detail Form" \
+#                https://$address/join >$tmpdir/github-curl.out 2>&1
+status=$(curl --insecure --location --silent --show-error \
+              --cookie $tmpdir/cookies \
+              --cookie-jar $tmpdir/cookies \
+              --request POST \
+              --form "authenticity_token=$token" \
+              --form "user[login]=$username" \
+              --form "user[email]=$email" \
+              --form "user[password]=$password" \
+              --form "user[password_confirmation]=$password" \
+              --form "source_label=Detail Form" \
+              --output $tmpdir/create-administrator.out \
+              --write-out '%{http_code}' \
+              $join_url)
+
+case $status in
+  201) # Created
+    console "Create Administrator succeeded [Status: $status]"
+    ;;
+  *)
+    console ERROR "Could not Create Administrator [Status: $status]"
+    console ERROR "Response Body: $(sed -n -e '/^{/,$p' $tmpdir/create-administrator.out)"
+    exit 1
+    ;;
+esac
+
+grep "< Set-Cookie: logged_in=yes;" $tmpdir/create-administrator.out
+
+rc=$?
+sleep 2 # Wait for script messages to post
+exit $rc

@@ -1,0 +1,226 @@
+#!/bin/bash
+#
+# Configure WordPress
+#
+
+#  1. Initalize Environment
+
+bindir=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+confdir=${bindir%/*}/conf
+
+zone=$(curl -s -m 60 http://169.254.169.254/latest/meta-data/placement/availability-zone)
+region=${zone:: -1}
+zonecode=${zone: -1}
+
+logfile=/var/log/$(basename $0).log
+initial_echo=1  # Start cfn-init.log command output on new line
+
+wp_config_sample=/var/www/html/wp-config-sample.php
+wp_config=/var/www/html/wp-config.php
+sedfile=/tmp/wp-config-$$.sed
+
+interactive=1
+verbose=1
+
+wordpress_title=WordPress
+wordpress_host=$(hostname)
+unset wordpress_secret
+unset wordpress_user
+unset wordpress_password
+unset wordpress_email
+
+unset wordpress_db_host
+unset wordpress_db_database
+unset wordpress_db_secret
+unset wordpress_db_user
+unset wordpress_db_password
+
+
+#  2. Define functions
+
+usage() {
+    echo "Usage: ${BASH_SOURCE##*/} [-n] [-v]"
+    echo "                  [-t title]"
+    echo "                  [-h host]"
+    echo "                  [-s secret] [-u user] [-p password] [-e email]"
+    echo "                  [-H host] [-D database]"
+    echo "                  [-S secret] [-U user] [-P password]"
+    echo "  -n              non-interactive"
+    echo "  -v              verbose"
+    echo "  -t title        WordPress Title (default: $wordpress_title)"
+    echo "  -h host         WordPress Host (default: $wordpress_host)"
+    echo "  -s secret-id    WordPress Administrator SecretId"
+    echo "  -u user         WordPress Administrator User"
+    echo "  -p password     WordPress Administrator Password"
+    echo "  -e email        WordPress Administrator Email Address"
+    echo "  -H host         WordPress Database Host"
+    echo "  -D database     WordPress Database"
+    echo "  -S secret-id    WordPress Database Administrator SecretId"
+    echo "  -U user         WordPress Database Administrator User"
+    echo "  -P password     WordPress Database Administrator Password"
+}
+
+console() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN";  shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO";  shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO";;
+    esac
+
+    if [ $interactive = 1 ]; then
+        if [ $verbose -ge $level ]; then
+            echo "$*"
+        fi
+    else
+        [ $initial_echo = 1 ] && echo && initial_echo=0
+        # cfn-init.log format
+        echo "$(date +'%Y-%m-%d %H:%M:%S,%3N') [$label] $*"
+    fi
+}
+
+log() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN "; shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO "; shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO ";;
+    esac
+
+    # syslog format
+    echo "$(date +'%b %e %H:%M:%S') $this_host $(basename $0): $label $*" >> $logfile
+}
+
+
+#  3. Parse command line options
+
+while getopts nvt:h:s:u:p:e:H:D:S:U:P:? arg; do
+    case $arg in
+    n)  interactive=0;;
+    v)  ((verbose++));;
+    t)  wordpress_title="$OPTARG";;
+    h)  wordpress_host="$OPTARG";;
+    s)  wordpress_secret="$OPTARG";;
+    u)  wordpress_user="$OPTARG";;
+    p)  wordpress_password="$OPTARG";;
+    e)  wordpress_email="$OPTARG";;
+    H)  wordpress_db_host="$OPTARG";;
+    D)  wordpress_db_database="$OPTARG";;
+    S)  wordpress_db_secret="$OPTARG";;
+    U)  wordpress_db_user="$OPTARG";;
+    P)  wordpress_db_password="$OPTARG";;
+    ?)  usage
+        exit 1;;
+    esac
+done
+
+
+#  4. Validate environment
+
+if [ -z "$wordpress_title" ]; then
+    console ERROR "-t title missing!"
+    console ERROR "Could not automatically determine title, and it was not specified as a parameter"
+    exit 10
+fi
+
+if [ -z $wordpress_host ]; then
+    console ERROR "-h host missing!"
+    console ERROR "Could not automatically determine host, and it was not specified as a parameter"
+    exit 20
+fi
+
+#if [ -z $wordpress_secret ] ||
+#   [ -z $wordpress_user ] && [ -z $wordpress_password ]; then
+#    console ERROR "-s secret missing or both -u user & -p password missing!"
+#    console ERROR "WordPress Administrator Secret or both WordPress Administrator User and Password are required"
+#    exit 24
+#fi
+
+if [ -z $wordpress_email ]; then
+    console ERROR "-e email missing!"
+    console ERROR "Could not automatically determine Administrator Email, and it was not specified as a parameter"
+    exit 26
+fi
+
+if [ -z $wordpress_db_host ]; then
+    console ERROR "-H host missing!"
+    console ERROR "Could not automatically determine host, and it was not specified as a parameter"
+    exit 30
+fi
+
+if [ -z $wordpress_db_database ]; then
+    console ERROR "-D database missing!"
+    console ERROR "Could not automatically determine database, and it was not specified as a parameter"
+    exit 32
+fi
+
+#if [ -z $wordpress_db_secret ] ||
+#   [ -z $wordpress_db_user ] && [ -z $wordpress_db_password ]; then
+#    console ERROR "-S secret missing or both -U user & -P password missing!"
+#    console ERROR "WordPress Database Administrator Secret or both WordPress Database Administrator User and Password are required"
+#    exit 34
+#fi
+
+
+#  5. Main
+
+if [ ! -z $wordpress_secret ]; then
+  console "Obtaining '$wordpress_secret' secret from SecretsManager..."
+
+  wordpress_secret_string=$(aws secretsmanager get-secret-value --secret-id $wordpress_secret \
+                                                                --query 'SecretString' \
+                                                                --region $region --output text)
+  RC=$?
+
+  if [ $RC = 0 ]; then
+      console "Obtained '$wordpress_secret' secret successfully"
+  else
+      console ERROR "Could not obtain '$wordpress_secret' secret! Error: $RC"
+      exit 90
+  fi
+  wordpress_user=$(echo $wordpress_secret_string | sed -n -e 's/^.*"username":"\([a-zA-Z0-9]*\)".*$/\1/p')
+  wordpress_password=$(echo $wordpress_secret_string | sed -n -e 's/^.*"password":"\([a-zA-Z0-9]*\)".*$/\1/p')
+fi
+
+if [ ! -z $wordpress_db_secret ]; then
+  console "Obtaining '$wordpress_db_secret' secret from SecretsManager..."
+
+  wordpress_db_secret_string=$(aws secretsmanager get-secret-value --secret-id $wordpress_db_secret \
+                                                                   --query 'SecretString' \
+                                                                   --region $region --output text)
+  RC=$?
+
+  if [ $RC = 0 ]; then
+      console "Obtained '$wordpress_db_secret' secret successfully"
+  else
+      console ERROR "Could not obtain '$wordpress_db_secret' secret! Error: $RC"
+      exit 92
+  fi
+  wordpress_db_user=$(echo $wordpress_db_secret_string | sed -n -e 's/^.*"username":"\([a-zA-Z0-9]*\)".*$/\1/p')
+  wordpress_db_password=$(echo $wordpress_db_secret_string | sed -n -e 's/^.*"password":"\([a-zA-Z0-9]*\)".*$/\1/p')
+fi
+
+
+console "Create WordPress Configuration File"
+cat << EOF > $sedfile
+/^define( 'DB_NAME', '/s/database_name_here/$wordpress_db_database/
+/^define( 'DB_USER', '/s/username_here/$wordpress_db_user/
+/^define( 'DB_PASSWORD', '/s/password_here/$wordpress_db_password/
+/^define( 'DB_HOST', '/s/localhost/$wordpress_db_host/
+EOF
+
+sed -f $sedfile $wp_config_sample > $wp_config
+
+
+console "Install WordPress Command-Line Tools"
+curl https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp
+chmod +x /usr/local/bin/wp
+
+
+console "Initialize WordPress"
+/usr/local/bin/wp core install --path=/var/www/html --url="http://$wordpress_host" --title="$wordpress_title" --admin_user="$wordpress_user" --admin_password="$wordpress_password" --admin_email="$wordpress_email"
+
+console "Create WordPress Blog Post"
+/usr/local/bin/wp post create --path=/var/www/html --post_type="post" --post_status="publish" --post_title="Post on $(date '+%Y-%m-%d %H:%M')" --post_content="Post created with wp on $(hostname)"

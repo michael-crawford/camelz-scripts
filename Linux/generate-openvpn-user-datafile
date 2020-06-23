@@ -1,0 +1,108 @@
+#!/bin/bash
+#
+# Generate OpenVPNAS User Data File with:
+# - User
+# - Group
+# - PAM Hash
+# - OpenVPN Hash
+#
+# This file may be extended in the future to add more attributes
+
+#  1. Initalize Environment
+
+bindir=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+confdir=${bindir%/*}/conf
+
+environment=Production
+type=Standard
+
+
+#  2. Define functions
+
+usage() {
+    echo "Usage: ${BASH_SOURCE##*/} [-E environment] [-T type]"
+    echo "  -E environment  Environment (default: $environment)"
+    echo "  -T type         Type (default: $type)"
+}
+
+
+#  3. Parse command line options
+
+while getopts E:T:? arg; do
+    case $arg in
+    E)  environment="$OPTARG";;
+    T)  type="$OPTARG";;
+    ?)  usage
+        exit 1;;
+    esac
+done
+
+shift $(($OPTIND - 1))
+
+
+#  4. Validate environment
+
+if [ -z $environment ]; then
+    echo "-E environment missing!"
+    exit 10
+else
+    case $environment in
+      Production)
+        ;;
+      Staging)
+        ;;
+      UAT)
+        ;;
+      Testing)
+        ;;
+      Development)
+        ;;
+      Build)
+        ;;
+      Core)
+        ;;
+      Logging)
+        ;;
+      Identity)
+        ;;
+      *)
+        echo "-E $environment invalid! Must be Production, Staging, UAT, Testing, Development, Build, Core, Logging or Identity"
+        exit 11;;
+    esac
+fi
+
+if [ -z $type ]; then
+    echo "-T type missing!"
+    exit 12
+else
+    case $type in
+      Standard)
+        ;;
+      Custom)
+        ;;
+      *)
+        echo "-T $type invalid! Must be Standard or Custom"
+        exit 13;;
+    esac
+fi
+
+plaintextuserdatfile=$confdir/$environment-${type}Users-Insecure.dat
+hasheduserdatfile=$confdir/$environment-${type}Users.dat
+
+if [ ! -r $plaintextuserdatfile ]; then
+    echo "Plaintext User Data File: $plaintextuserdatfile missing!"
+    exit 21
+fi
+
+
+#  5. Main
+
+echo "#User:Group:PAM Hash:OpenVPN Hash" > $hasheduserdatfile
+
+while IFS=: read -r user group password; do
+    [ ${user:0:1} = \# ] && continue
+    echo "- $user"
+    pam_hash=$(create-password-hash -t pam $password)
+    openvpn_hash=$(create-password-hash -t openvpn $password)
+    echo "$user:$group:$pam_hash:$openvpn_hash" >> $hasheduserdatfile
+done < $plaintextuserdatfile

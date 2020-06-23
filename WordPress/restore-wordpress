@@ -1,0 +1,163 @@
+#!/bin/bash
+#
+# Restore WordPress Database from S3
+#
+
+exit
+# This is a placeholder that is just a copy of the openvpn script as a starting point
+
+#  1. Initalize Environment
+
+zone=$(curl -s -m 60 http://169.254.169.254/latest/meta-data/placement/availability-zone)
+region=${zone::-1}
+
+openvpnhome=/usr/local/openvpn_as
+openvpnbakdir=/var/backups/openvpn_as
+openvpnlog=/var/log/backup-openvpnas.log
+
+logfile=/var/log/$(basename $0).log
+initial_echo=1  # Start cfn-init.log command output on new line
+
+interactive=1
+verbose=1
+unset bucket
+folder=OpenVPNAS
+set=$(hostname -s)
+version=latest
+
+
+#  2. Define functions
+
+usage() {
+    echo "Usage: ${BASH_SOURCE##*/} [-n] [-v]"
+    echo "                  [-b bucket] [-f folder]"
+    echo "                  [-S set] [-V version]"
+    echo "  -n              non-interactive"
+    echo "  -v              verbose"
+    echo "  -b bucket       Bucket (default: $bucket)"
+    echo "  -f folder       Folder (default: $folder)"
+    echo "  -S set          Backup Set (default: $set)"
+    echo "  -V version      Backup Version (default: $version)"
+}
+
+console() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN";  shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO";  shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO";;
+    esac
+
+    if [ $interactive = 1 ]; then
+        if [ $verbose -ge $level ]; then
+            echo "$*"
+        fi
+    else
+        [ $initial_echo = 1 ] && echo && initial_echo=0
+        # cfn-init.log format
+        echo "$(date +'%Y-%m-%d %H:%M:%S,%3N') [$label] $*"
+    fi
+}
+
+log() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN "; shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO "; shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO ";;
+    esac
+
+    # syslog format
+    echo "$(date +'%b %e %H:%M:%S') $this_host $(basename $0): $label $*" >> $logfile
+}
+
+
+#  3. Parse command line options
+
+while getopts nvb:f:S:B:? arg; do
+    case $arg in
+    n)  interactive=0;;
+    v)  ((verbose++));;
+    b)  bucket="$OPTARG";;
+    f)  folder="$OPTARG";;
+    S)  set="$OPTARG";;
+    V)  version="$OPTARG";;
+    ?)  usage
+        exit 1;;
+    esac
+done
+
+
+#  4. Validate environment
+
+if [ -z $bucket ]; then
+    console ERROR "-b bucket missing!"
+    console ERROR "Could not automatically determine bucket, and it was not specified as a parameter"
+    exit 10
+fi
+
+if [ -z $folder ]; then
+    console ERROR "-f folder missing!"
+    console ERROR "Could not automatically determine folder, and it was not specified as a parameter"
+    exit 12
+fi
+
+if [ -z $set ]; then
+    console ERROR "-S set missing!"
+    console ERROR "Could not automatically determine backup set, and it was not specified as a parameter"
+    exit 14
+fi
+
+if [ -z $version ]; then
+    console ERROR "-V version missing!"
+    console ERROR "Could not automatically determine backup version, and it was not specified as a parameter"
+    exit 16
+fi
+
+
+#  5. Main
+
+mkdir -p $openvpnbakdir/$set/$version
+rm -f $openvpnbakdir/$set/$version/*.conf.bak
+
+console "Syncing OpenVPNAS backup from s3://$bucket/$folder/$set/$version to $openvpnbakdir/$set/$version"
+log     "Syncing OpenVPNAS backup from s3://$bucket/$folder/$set/$version to $openvpnbakdir/$set/$version"
+aws s3 sync s3://$bucket/$folder/$set/$version $openvpnbakdir/$set/$version  \
+            --region $region; rc01=$?
+if [[ $rc01 = 0 ]]; then
+  console DEBUG "Sync successful"
+  log     DEBUG "Sync successful"
+else
+  console ERROR "Sync failed"
+  log     ERROR "Sync failed"
+  exit 1
+fi
+
+console "Restoring OpenVPNAS from $openvpnbakdir/$set/$version"
+log     "Restoring OpenVPNAS from $openvpnbakdir/$set/$version"
+
+service openvpnas stop
+
+rm -f $openvpnhome/etc/db/config.db
+rm -f $openvpnhome/etc/db/certs.db
+rm -f $openvpnhome/etc/db/userprop.db
+rm -f $openvpnhome/etc/db/log.db
+rm -f $openvpnhome/etc/as.conf
+
+$openvpnhome/bin/sqlite3 < $openvpnbakdir/config.db.bak   $openvpnhome/etc/db/config.db;   rc11=$?
+$openvpnhome/bin/sqlite3 < $openvpnbakdir/certs.db.bak    $openvpnhome/etc/db/certs.db;    rc12=$?
+$openvpnhome/bin/sqlite3 < $openvpnbakdir/userprop.db.bak $openvpnhome/etc/db/userprop.db; rc13=$?
+$openvpnhome/bin/sqlite3 < $openvpnbakdir/log.db.bak      $openvpnhome/etc/db/log.db;      rc14=$?
+
+cp $openvpnbakdir/$set/$version/as.conf.bak $openvpnhome/etc/as.conf ; rc15=$?
+
+if [[ $rc11 = 0 && $rc12 = 0 && $rc13 = 0 && $rc14 = 0 && $rc15 = 0 ]]; then
+  console DEBUG "Restore successful"
+  log     DEBUG "Restore successful"
+else
+  console ERROR "Restore failed"
+  log     ERROR "Restore failed"
+  exit 1
+fi

@@ -1,0 +1,150 @@
+#!/bin/bash
+#
+# Attach Volume
+#
+
+#  1. Initalize Environment
+
+zone=$(curl -s -m 60 http://169.254.169.254/latest/meta-data/placement/availability-zone)
+region=${!zone:: -1}
+instance=$(curl -s -m 60 http://169.254.169.254/latest/meta-data/instance-id)
+
+logfile=/var/log/$(basename $0).log
+initial_echo=1  # Start cfn-init.log command output on new line
+
+interactive=1
+verbose=1
+wait=0
+unset volume
+unset device
+
+
+#  2. Define functions
+
+usage() {
+    echo "Usage: ${BASH_SOURCE##*/} [-n] [-v] [-w]"
+    echo "                  [-v volume] [-d device]"
+    echo "  -n              non-interactive"
+    echo "  -v              verbose"
+    echo "  -w              wait"
+    echo "  -v volume       Volume"
+    echo "  -d device       Device"
+}
+
+console() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN";  shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO";  shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO";;
+    esac
+
+    if [ $interactive = 1 ]; then
+        if [ $verbose -ge $level ]; then
+            echo "$*"
+        fi
+    else
+        [ $initial_echo = 1 ] && echo && initial_echo=0
+        # cfn-init.log format
+        echo "$(date +'%Y-%m-%d %H:%M:%S,%3N') [$label] $*"
+    fi
+}
+
+log() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN "; shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO "; shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO ";;
+    esac
+
+    # syslog format
+    echo "$(date +'%b %e %H:%M:%S') $this_host $(basename $0): $label $*" >> $logfile
+}
+
+
+#  3. Parse command line options
+
+while getopts nvwv:d:? arg; do
+    case $arg in
+    n)  interactive=0;;
+    v)  ((verbose++));;
+    w)  wait=1;;
+    v)  volume="$OPTARG";;
+    d)  device="$OPTARG";;
+    ?)  usage
+        exit 1;;
+    esac
+done
+
+shift $(($OPTIND - 1))
+
+
+#  4. Validate environment
+
+if [ -z $volume ]; then
+    console ERROR "-v volume missing!"
+    exit 10
+fi
+
+if [ -z $device ]; then
+    console ERROR "-d device missing!"
+    exit 12
+else
+    case $device in
+      xvdb|xvdc|xvdd|xvde|xvdf|xvdg|xvdh|xvdi|xvdj|xvdk|xvdl|xvdm|xvdn|xvdo|xvdp|xvdq|xvdr|xvds|xvdt|xvdu|xvdv|xvdw|xvdx|xvdy|xvdz)
+        ;;
+      *)
+        console ERROR "-d $device invalid! Must be between xvdb and xvdz"
+        exit 13;;
+    esac
+fi
+
+
+#  5. Main
+
+console DEBUG "Attaching Volume $volume to Instance $instance as device /dev/$device"
+aws ec2 attach-volume --instance-id $instance --volume-id $volume --device /dev/$device --region $region --output text; rc1=$?
+if [ $rc1 ]; then
+    console "Volume $volume attached to Instance $instance as device /dev/$device"
+else
+    console ERROR "Could not attach Volume $volume to Instance $instance as device /dev/$device"
+    error 1
+fi
+
+if [ $wait = 1 ]; then
+    console DEBUG "Wait for Instance to recognize Device /dev/$device"
+    attempt=0
+    attempts=30
+    delay=10
+    attached=0
+    while ((attempt++ <= attempts)); do
+        if fdisk -l /dev/$device &> /dev/null; then
+            attached=1
+            break
+        else
+            console DEBUG "Device /dev/$device not yet recognized, pausing $delay seconds..."
+            sleep $delay
+        fi
+    done
+
+    if [ $attached = 1 ]; then
+        console "Device /dev/$device recognized"
+    else
+        console ERROR "Device /dev/$device was not recognized"
+        exit 2
+    fi
+
+    filesystem_type=$(file -sL /dev/$device)
+    if [[ $filesystem_type == *"XFS"* ]]; then
+        console DEBUG "Device /dev/$device formatted with XFS Filesystem"
+    elif [[ $filesystem_type == *"ext4"* ]]; then
+        console DEBUG "Device /dev/$device formatted with ext4 Filesystem"
+    else
+        console DEBUG "Device /dev/$device not formatted, or formatted with unrecognized file system"
+    fi
+fi
+sleep 2 # Wait for script messages to post
+exit 0

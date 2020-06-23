@@ -1,0 +1,158 @@
+#!/bin/bash
+#
+# Configure GitHubEnterprise Organization
+#
+
+#  1. Initalize Environment
+
+logfile=/var/log/$(basename $0).log
+initial_echo=1  # Start cfn-init.log command output on new line
+
+interactive=1
+verbose=1
+private=0
+username=""
+password=""
+organization=""
+
+
+#  2. Define functions
+
+usage() {
+    echo "Usage: ${BASH_SOURCE##*/} [-n] [-v] [-p]"
+    echo "                  [-U username] [-P password]"
+    echo "                  [-O organization]"
+    echo "  -n              non-interactive"
+    echo "  -v              verbose"
+    echo "  -p              private subnet"
+    echo "  -U username     Administrator Username"
+    echo "  -P password     Administrator Password"
+    echo "  -O organization Organization"
+}
+
+console() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN";  shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO";  shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO";;
+    esac
+
+    if [ $interactive = 1 ]; then
+        if [ $verbose -ge $level ]; then
+            echo "$*"
+        fi
+    else
+        [ $initial_echo = 1 ] && echo && initial_echo=0
+        # cfn-init.log format
+        echo "$(date +'%Y-%m-%d %H:%M:%S,%3N') [$label] $*"
+    fi
+}
+
+log() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN "; shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO "; shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO ";;
+    esac
+
+    # syslog format
+    echo "$(date +'%b %e %H:%M:%S') $this_host $(basename $0): $label $*" >> $logfile
+}
+
+isip() {
+    local IFS='.'
+    local ip=$1
+
+    if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        octet=($ip)
+        if [[ ${octet[0]} -le 255 && ${octet[1]} -le 255 && ${octet[2]} -le 255 && ${octet[3]} -le 255 ]]; then
+            return $?
+        else
+            return 9
+        fi
+    fi
+    return 9
+}
+
+
+#  3. Parse command line options
+
+while getopts nvpU:P:O:? arg; do
+    case $arg in
+    n)  interactive=0;;
+    v)  ((verbose++));;
+    p)  private=1;;
+    U)  username="$OPTARG";;
+    P)  password="$OPTARG";;
+    O)  organization="$OPTARG";;
+    ?)  usage
+        exit 1;;
+    esac
+done
+
+shift $(($OPTIND - 1))
+
+if [ $private = 1 ]; then
+    address=$(curl -s -m 60 http://169.254.169.254/latest/meta-data/local-ipv4)
+else
+    address=$(curl -s -m 60 http://169.254.169.254/latest/meta-data/public-ipv4)
+fi
+
+
+#  4. Validate environment
+
+if [ -z $username ]; then
+    console ERROR "-U username missing!"
+    exit 10
+fi
+
+if [ -z $password ]; then
+    console ERROR "-P password missing!"
+    exit 12
+fi
+
+if [ -z $organization ]; then
+    console ERROR "-O organization missing!"
+    exit 14
+fi
+
+if ! isip "$address"; then
+    console ERROR "address is invalid - using private subnet?"
+    exit 20
+fi
+
+
+#  5. Main
+
+admin_organizations_url=https://$username:$password@$address/api/v3/admin/organizations
+
+tmpdir=$(mktemp -d /tmp/XXXXXXXXXXXXX)
+
+console "Create first GitHub Enterprise Organization"
+# Original: MAKE_ORG=$(curl -i -k -L -H "Content-Type: application/json" --write-out '%{http_code}' --silent -d "{\"login\": ${ORG}, \"admin\": ${ADMIN_USER}}" -X POST https://$1:$3@${EC2_IP}/api/v3/admin/organizations)
+status=$(curl --include --insecure --location --silent --show-error \
+              --header "Content-Type: application/json" \
+              --request POST \
+              --data "{\"login\": \"${organization}\", \"admin\": \"${username}\"}" \
+              --output $tmpdir/create-organization.out \
+              --write-out '%{http_code}' \
+              $admin_organizations_url)
+
+case $status in
+  201)
+    console "Create Organization succeeded [Status: $status]"
+    ;;
+  *)
+    console ERROR "Could not Create Organization [Status: $status]"
+    console ERROR "Response Body: $(sed -n -e '/^{/,$p' $tmpdir/create-organization.out)"
+    exit 1
+    ;;
+esac
+
+rc=$?
+sleep 2 # Wait for script messages to post
+exit $rc

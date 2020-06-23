@@ -1,0 +1,138 @@
+#!/bin/bash
+#
+# Associate EIP
+#
+
+#  1. Initalize Environment
+
+zone=$(curl -s -m 60 http://169.254.169.254/latest/meta-data/placement/availability-zone)
+region=${zone:: -1}
+zonecode=${zone: -1}
+instance=$(curl -s -m 60 http://169.254.169.254/latest/meta-data/instance-id)
+
+logfile=/var/log/$(basename $0).log
+initial_echo=1  # Start cfn-init.log command output on new line
+
+interactive=1
+verbose=1
+
+
+#  2. Define functions
+
+usage() {
+    echo "Usage: ${BASH_SOURCE##*/} [-n] [-v]"
+    echo "                  [-a eipalloc] [-b eipalloc] [-c eipalloc]"
+    echo "                  [-d eipalloc] [-e eipalloc] [-f eipalloc]"
+    echo "  -n              non-interactive"
+    echo "  -v              verbose"
+    echo "  -a eipalloc     EIP Allocation for Zone A"
+    echo "  -b eipalloc     EIP Allocation for Zone B"
+    echo "  -c eipalloc     EIP Allocation for Zone C"
+    echo "  -d eipalloc     EIP Allocation for Zone D"
+    echo "  -e eipalloc     EIP Allocation for Zone E"
+    echo "  -f eipalloc     EIP Allocation for Zone F"
+}
+
+console() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN";  shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO";  shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO";;
+    esac
+
+    if [ $interactive = 1 ]; then
+        if [ $verbose -ge $level ]; then
+            echo "$*"
+        fi
+    else
+        [ $initial_echo = 1 ] && echo && initial_echo=0
+        # cfn-init.log format
+        echo "$(date +'%Y-%m-%d %H:%M:%S,%3N') [$label] $*"
+    fi
+}
+
+log() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN "; shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO "; shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO ";;
+    esac
+
+    # syslog format
+    echo "$(date +'%b %e %H:%M:%S') $this_host $(basename $0): $label $*" >> $logfile
+}
+
+
+#  3. Parse command line options
+
+while getopts nva:b:c:d:e:f:? arg; do
+    case $arg in
+    n)  interactive=0;;
+    v)  ((verbose++));;
+    a)  eipalloca="$OPTARG";;
+    b)  eipallocb="$OPTARG";;
+    c)  eipallocc="$OPTARG";;
+    d)  eipallocd="$OPTARG";;
+    e)  eipalloce="$OPTARG";;
+    f)  eipallocf="$OPTARG";;
+    ?)  usage
+        exit 1;;
+    esac
+done
+
+shift $(($OPTIND - 1))
+
+
+#  4. Validate environment
+
+if [ $zonecode = a -a -z "$eipalloca" ]; then
+    console ERROR "-a eipalloc missing!"
+    exit 10
+fi
+
+if [ $zonecode = b -a -z "$eipallocb" ]; then
+    console ERROR "-b eipalloc missing!"
+    exit 12
+fi
+
+if [ $zonecode = c -a -z "$eipallocc" ]; then
+    console ERROR "-c eipalloc missing!"
+    exit 14
+fi
+
+if [ $zonecode = d -a -z "$eipallocd" ]; then
+    console ERROR "-d eipalloc missing!"
+    exit 16
+fi
+
+if [ $zonecode = e -a -z "$eipalloce" ]; then
+    console ERROR "-e eipalloc missing!"
+    exit 18
+fi
+
+if [ $zonecode = f -a -z "$eipallocf" ]; then
+    console ERROR "-f eipalloc missing!"
+    exit 20
+fi
+
+
+#  5. Main
+
+case $zonecode in
+  a) eipalloc=$eipalloca;;
+  b) eipalloc=$eipallocb;;
+  c) eipalloc=$eipallocc;;
+  d) eipalloc=$eipallocd;;
+  e) eipalloc=$eipalloce;;
+  f) eipalloc=$eipallocf;;
+esac
+
+console "Associating EIP $eipalloc with Instance $instance"
+aws ec2 associate-address --instance-id $instance --allocation-id $eipalloc --region $region --output text
+rc=$?
+sleep 2 # Wait for script messages to post
+exit $rc

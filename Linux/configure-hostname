@@ -1,0 +1,113 @@
+#!/bin/bash
+#
+# Configure Hostname
+#
+
+#  1. Initalize Environment
+
+zone=$(curl -s -m 60 http://169.254.169.254/latest/meta-data/placement/availability-zone)
+region=${zone:: -1}
+zonecode=${zone: -1}
+address=$(curl -s -m 60 http://169.254.169.254/latest/meta-data/local-ipv4)
+
+logfile=/var/log/$(basename $0).log
+initial_echo=1  # Start cfn-init.log command output on new line
+
+interactive=1
+verbose=1
+appendzone=0
+host=$(hostname -s)
+domain=$(hostname -d)
+
+
+#  2. Define functions
+
+usage() {
+    echo "Usage: ${BASH_SOURCE##*/} [-n] [-v] [-z] [-m]"
+    echo "                  [-h host] [-d domain]"
+    echo "  -n              non-interactive"
+    echo "  -v              verbose"
+    echo "  -z              append zone"
+    echo "  -h host         Host (default: $host)"
+    echo "  -d domain       Domain (default: $domain)"
+}
+
+console() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN";  shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO";  shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO";;
+    esac
+
+    if [ $interactive = 1 ]; then
+        if [ $verbose -ge $level ]; then
+            echo "$*"
+        fi
+    else
+        [ $initial_echo = 1 ] && echo && initial_echo=0
+        # cfn-init.log format
+        echo "$(date +'%Y-%m-%d %H:%M:%S,%3N') [$label] $*"
+    fi
+}
+
+log() {
+    case $1 in
+      "error" | "ERROR" | 0) level=0; label="ERROR"; shift 1;;
+      "warn"  | "WARN"  | 1) level=1; label="WARN "; shift 1;;
+      "info"  | "INFO"  | 2) level=2; label="INFO "; shift 1;;
+      "debug" | "DEBUG" | 3) level=3; label="DEBUG"; shift 1;;
+                          *) level=2; label="INFO ";;
+    esac
+
+    # syslog format
+    echo "$(date +'%b %e %H:%M:%S') $this_host $(basename $0): $label $*" >> $logfile
+}
+
+
+#  3. Parse command line options
+
+while getopts nvzh:d:? arg; do
+    case $arg in
+    n)  interactive=0;;
+    v)  ((verbose++));;
+    z)  appendzone=1;;
+    h)  host="$OPTARG";;
+    d)  domain="$OPTARG";;
+    ?)  usage
+        exit 1;;
+    esac
+done
+
+shift $(($OPTIND - 1))
+
+
+#  4. Validate environment
+
+if [ -z $host ]; then
+    console ERROR "-h host missing!"
+    console ERROR "Could not automatically determine host, and it was not specified as a parameter"
+    exit 10
+fi
+
+if [ -z $domain ]; then
+    console ERROR "-d domain missing!"
+    console ERROR "Could not automatically determine domain, and it was not specified as a parameter"
+    exit 12
+fi
+
+
+#  5. Main
+
+if [ $appendzone = 1 ]; then
+    host=$host$zonecode
+fi
+
+console "Setting hostname to $host.$domain"
+sed -i -e "/^$address/d" -e "$ a$address $host.$domain $host" /etc/hosts
+echo $host.$domain > /etc/hostname
+hostname $host.$domain
+rc=$?
+sleep 2 # Wait for script messages to post
+exit $rc
