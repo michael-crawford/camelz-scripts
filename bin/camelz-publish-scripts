@@ -1,0 +1,16 @@
+#!/bin/bash
+#
+# Cross-Account Multi-Environment Landing Zones Framework - Publish Scripts
+#
+
+bindir=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+rootdir=${bindir%/*}
+srcdir=$rootdir/src
+bucketdir=$rootdir/bucket
+
+echo "Publishing Scripts"
+echo "  - src   : $srcdir"
+echo "  - bucket: $bucketdir"
+echo "===================="
+
+rsync -avzP $srcdir/ $bucketdir
